@@ -326,8 +326,11 @@ static bool handle_committed_state(gesture_ctx* ctx, touch* touches, int count)
 		ctx->peak_velx = avg_vel;
 		ctx->dir = (avg_vel >= 0) ? 1 : -1;
 
-		for (int i = 0; i < count; ++i)
-			ctx->base_x[i] = touches[i].x;
+		for (int i = 0; i < count; ++i) {
+			if (touches[i].slot < 0)
+				continue;
+			ctx->base_x[touches[i].slot] = touches[i].x;
+		}
 	}
 
 	return true;
@@ -342,7 +345,9 @@ static void handle_idle_state(gesture_ctx* ctx, touch* touches, int count,
 	// Count how many fingers have moved enough (allow some to lag)
 	int moved_count = 0;
 	for (int i = 0; i < count; ++i) {
-		if (fabsf(touches[i].x - ctx->base_x[i]) >= need)
+		if (touches[i].slot < 0)
+			continue;
+		if (fabsf(touches[i].x - ctx->base_x[touches[i].slot]) >= need)
 			moved_count++;
 	}
 	// At least half the fingers should have moved
@@ -381,7 +386,9 @@ static void handle_armed_state(gesture_ctx* ctx, touch* touches, int count,
 
 	int mismatch_count = 0;
 	for (int i = 0; i < count; ++i) {
-		float ddx = touches[i].x - ctx->prev_x[i];
+		if (touches[i].slot < 0)
+			continue;
+		float ddx = touches[i].x - ctx->prev_x[touches[i].slot];
 		if (fabsf(ddx) < stepReq || (ddx * dx) < 0) {
 			mismatch_count++;
 			if (mismatch_count > g_config.swipe_tolerance) {
@@ -426,8 +433,11 @@ static void gestureCallback(touch* touches, int count)
 		if (ctx->state == GS_ARMED)
 			ctx->state = GS_IDLE;
 
-		for (int i = 0; i < count; ++i)
-			ctx->prev_x[i] = ctx->base_x[i] = touches[i].x;
+		for (int i = 0; i < count; ++i) {
+			if (touches[i].slot < 0)
+				continue;
+			ctx->prev_x[touches[i].slot] = ctx->base_x[touches[i].slot] = touches[i].x;
+		}
 
 		goto unlock;
 	}
@@ -443,9 +453,11 @@ static void gestureCallback(touch* touches, int count)
 	}
 
 	for (int i = 0; i < count; ++i) {
-		ctx->prev_x[i] = touches[i].x;
+		if (touches[i].slot < 0)
+			continue;
+		ctx->prev_x[touches[i].slot] = touches[i].x;
 		if (ctx->state == GS_IDLE)
-			ctx->base_x[i] = touches[i].x;
+			ctx->base_x[touches[i].slot] = touches[i].x;
 	}
 
 unlock:
