@@ -17,7 +17,8 @@ aerospace-swipe detects x-fingered(defaults to 3) swipes on your trackpad and co
 ## configuration
 config file is optional and only needed if you want to change the default settings(default settings are shown in the example below)
 
-> to restart after changing the config file, run `make restart`(this just unloads and reloads the launch agent)
+> to restart after changing the config file: `brew services restart aerospace-swipe` (homebrew install) or
+> `make restart` (manual install) — both just unload and reload the launch agent
 
 ```jsonc
 // ~/.config/aerospace-swipe/config.json
@@ -33,24 +34,46 @@ config file is optional and only needed if you want to change the default settin
 ```
 
 ## installation
+### homebrew (recommended)
+```bash
+brew tap momepp/formulae
+brew install aerospace-swipe        # stable, pinned to the latest tagged release
+# or: brew install --HEAD aerospace-swipe   # tracks the main branch instead
+
+brew services start aerospace-swipe # installs + loads the launchd service
+```
+> the tap ([MomePP/homebrew-formulae](https://github.com/MomePP/homebrew-formulae)) is public, but the formula
+> builds from source out of this repo, which is **private** — `brew install`/`brew reinstall` needs to `git
+> clone` it, so it only works on a machine with your own GitHub auth set up (`gh auth login`, or an SSH key
+> added to your account). Config, restart, and uninstall all work the same as the manual install below, except
+> use `brew services restart|stop aerospace-swipe` instead of `make restart`/`make uninstall` for the launchd
+> service — `brew` owns that plist once installed this way.
+
+### manual
 > this fork ([MomePP/aerospace-swipe](https://github.com/MomePP/aerospace-swipe)) is private, so the plain
 > `curl | bash` one-liner won't work — `raw.githubusercontent.com` can't authenticate against a private repo.
 > Clone with `gh` (already logged in) or SSH (key added to your GitHub account) instead, then run the script
 > from inside the checkout.
 
-### via gh CLI
+#### via gh CLI
 ```bash
 gh repo clone MomePP/aerospace-swipe
 cd aerospace-swipe
 ./install.sh # or: make install
 ```
-### via SSH
+#### via SSH
 ```bash
 git clone git@github.com:MomePP/aerospace-swipe.git
 cd aerospace-swipe
 ./install.sh # or: make install
 ```
 ## uninstallation
+### homebrew
+```bash
+brew services stop aerospace-swipe
+brew uninstall aerospace-swipe
+```
+### manual
 ```bash
 cd aerospace-swipe # wherever you cloned it, e.g. ~/.local/share/aerospace-swipe
 ./uninstall.sh # or: make uninstall
