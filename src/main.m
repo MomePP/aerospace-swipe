@@ -15,12 +15,217 @@ static pthread_mutex_t g_gesture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static gesture_ctx g_gesture_ctx = { 0 };
 static CFMutableDictionaryRef g_tracks = NULL;
 
+// fire_gesture() dispatches this onto the global concurrent GCD queue, so
+// back-to-back swipes can call switch_workspace() from different threads at
+// once. Without this lock, the list-workspaces + workspace-switch pair could
+// interleave with another thread's pair and act on a stale/foreign list.
+static pthread_mutex_t g_aerospace_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static BOOL g_enabled = YES;
+
+// Menu bar app delegate
+@interface AppDelegate : NSObject <NSApplicationDelegate> {
+    NSMenuItem *_sensitivityItems[3];
+    NSMenuItem *_fingerItems[3];
+}
+@property (strong, nonatomic) NSStatusItem *statusItem;
+@property (strong, nonatomic) NSMenuItem *enabledMenuItem;
+@property (strong, nonatomic) NSMenuItem *hapticMenuItem;
+@property (strong, nonatomic) NSMenuItem *naturalSwipeMenuItem;
+@property (strong, nonatomic) NSMenuItem *wrapAroundMenuItem;
+@property (strong, nonatomic) NSMenuItem *skipEmptyMenuItem;
+@end
+
+@implementation AppDelegate
+
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    // Skip menu bar if disabled in config
+    if (!g_config.show_menu_bar) {
+        NSLog(@"Menu bar disabled in config");
+        return;
+    }
+
+    // Create status bar item
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+
+    // Set the icon (using SF Symbol or fallback to text)
+    if (@available(macOS 11.0, *)) {
+        NSImage *icon = [NSImage imageWithSystemSymbolName:@"hand.draw" accessibilityDescription:@"AeroSpace Swipe"];
+        [icon setTemplate:YES];
+        self.statusItem.button.image = icon;
+    } else {
+        self.statusItem.button.title = @"⇄";
+    }
+    self.statusItem.button.toolTip = @"AeroSpace Swipe";
+
+    // Create menu
+    NSMenu *menu = [[NSMenu alloc] init];
+
+    // Enabled toggle
+    self.enabledMenuItem = [[NSMenuItem alloc] initWithTitle:@"Enabled" action:@selector(toggleEnabled:) keyEquivalent:@""];
+    self.enabledMenuItem.target = self;
+    self.enabledMenuItem.state = NSControlStateValueOn;
+    [menu addItem:self.enabledMenuItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Sensitivity submenu
+    NSMenuItem *sensitivityMenuItem = [[NSMenuItem alloc] initWithTitle:@"Sensitivity" action:nil keyEquivalent:@""];
+    NSMenu *sensitivityMenu = [[NSMenu alloc] init];
+    NSString *sensitivityLabels[] = {@"Low", @"Medium", @"High"};
+    for (int i = 0; i < 3; i++) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:sensitivityLabels[i] action:@selector(setSensitivity:) keyEquivalent:@""];
+        item.target = self;
+        item.tag = i + 1;
+        item.state = (g_config.sensitivity == i + 1) ? NSControlStateValueOn : NSControlStateValueOff;
+        [sensitivityMenu addItem:item];
+        _sensitivityItems[i] = item;
+    }
+    sensitivityMenuItem.submenu = sensitivityMenu;
+    [menu addItem:sensitivityMenuItem];
+
+    // Fingers submenu
+    NSMenuItem *fingersMenuItem = [[NSMenuItem alloc] initWithTitle:@"Fingers" action:nil keyEquivalent:@""];
+    NSMenu *fingersMenu = [[NSMenu alloc] init];
+    for (int i = 0; i < 3; i++) {
+        int fingers = i + 2;  // 2, 3, 4
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%d fingers", fingers] action:@selector(setFingers:) keyEquivalent:@""];
+        item.target = self;
+        item.tag = fingers;
+        item.state = (g_config.fingers == fingers) ? NSControlStateValueOn : NSControlStateValueOff;
+        [fingersMenu addItem:item];
+        _fingerItems[i] = item;
+    }
+    fingersMenuItem.submenu = fingersMenu;
+    [menu addItem:fingersMenuItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Toggle options
+    self.hapticMenuItem = [[NSMenuItem alloc] initWithTitle:@"Haptic Feedback" action:@selector(toggleHaptic:) keyEquivalent:@""];
+    self.hapticMenuItem.target = self;
+    self.hapticMenuItem.state = g_config.haptic ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:self.hapticMenuItem];
+
+    self.naturalSwipeMenuItem = [[NSMenuItem alloc] initWithTitle:@"Natural Swipe" action:@selector(toggleNaturalSwipe:) keyEquivalent:@""];
+    self.naturalSwipeMenuItem.target = self;
+    self.naturalSwipeMenuItem.state = g_config.natural_swipe ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:self.naturalSwipeMenuItem];
+
+    self.wrapAroundMenuItem = [[NSMenuItem alloc] initWithTitle:@"Wrap Around" action:@selector(toggleWrapAround:) keyEquivalent:@""];
+    self.wrapAroundMenuItem.target = self;
+    self.wrapAroundMenuItem.state = g_config.wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:self.wrapAroundMenuItem];
+
+    self.skipEmptyMenuItem = [[NSMenuItem alloc] initWithTitle:@"Skip Empty" action:@selector(toggleSkipEmpty:) keyEquivalent:@""];
+    self.skipEmptyMenuItem.target = self;
+    self.skipEmptyMenuItem.state = g_config.skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:self.skipEmptyMenuItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Quit
+    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"];
+    quitItem.target = self;
+    [menu addItem:quitItem];
+
+    self.statusItem.menu = menu;
+}
+
+- (void)toggleEnabled:(id)sender {
+    g_enabled = !g_enabled;
+    self.enabledMenuItem.state = g_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+
+    if (@available(macOS 11.0, *)) {
+        NSString *iconName = g_enabled ? @"hand.draw" : @"hand.raised.slash";
+        NSImage *icon = [NSImage imageWithSystemSymbolName:iconName accessibilityDescription:@"AeroSpace Swipe"];
+        [icon setTemplate:YES];
+        self.statusItem.button.image = icon;
+    }
+
+    NSLog(@"AeroSpace Swipe %@", g_enabled ? @"enabled" : @"disabled");
+}
+
+- (void)setSensitivity:(NSMenuItem *)sender {
+    int level = (int)sender.tag;
+    apply_sensitivity(&g_config, level);
+
+    // Update checkmarks (1=Low, 2=Medium, 3=High)
+    for (int i = 0; i < 3; i++) {
+        _sensitivityItems[i].state = (i + 1 == level) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+
+    NSLog(@"Sensitivity set to %d (distance=%.2f, fast=%.2fx@vel%.2f)",
+          level, g_config.distance_pct, g_config.fast_distance_factor, g_config.fast_velocity_threshold);
+}
+
+- (void)setFingers:(NSMenuItem *)sender {
+    int fingers = (int)sender.tag;
+    g_config.fingers = fingers;
+
+    // Update checkmarks
+    for (int i = 0; i < 3; i++) {
+        _fingerItems[i].state = (_fingerItems[i].tag == fingers) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+
+    NSLog(@"Fingers set to %d", fingers);
+}
+
+- (void)toggleHaptic:(id)sender {
+    g_config.haptic = !g_config.haptic;
+    self.hapticMenuItem.state = g_config.haptic ? NSControlStateValueOn : NSControlStateValueOff;
+
+    // Initialize haptic if enabling and not already initialized
+    if (g_config.haptic && !g_haptic) {
+        g_haptic = haptic_open_default();
+        if (!g_haptic) {
+            NSLog(@"Warning: Failed to initialize haptic actuator");
+        }
+    }
+
+    NSLog(@"Haptic feedback %@", g_config.haptic ? @"enabled" : @"disabled");
+}
+
+- (void)toggleNaturalSwipe:(id)sender {
+    g_config.natural_swipe = !g_config.natural_swipe;
+    self.naturalSwipeMenuItem.state = g_config.natural_swipe ? NSControlStateValueOn : NSControlStateValueOff;
+
+    // Update swipe directions
+    g_config.swipe_left = g_config.natural_swipe ? "next" : "prev";
+    g_config.swipe_right = g_config.natural_swipe ? "prev" : "next";
+
+    NSLog(@"Natural swipe %@", g_config.natural_swipe ? @"enabled" : @"disabled");
+}
+
+- (void)toggleWrapAround:(id)sender {
+    g_config.wrap_around = !g_config.wrap_around;
+    self.wrapAroundMenuItem.state = g_config.wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSLog(@"Wrap around %@", g_config.wrap_around ? @"enabled" : @"disabled");
+}
+
+- (void)toggleSkipEmpty:(id)sender {
+    g_config.skip_empty = !g_config.skip_empty;
+    self.skipEmptyMenuItem.state = g_config.skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSLog(@"Skip empty %@", g_config.skip_empty ? @"enabled" : @"disabled");
+}
+
+- (void)quit:(id)sender {
+    [[NSApplication sharedApplication] terminate:nil];
+}
+
+@end
+
 static void switch_workspace(const char* ws)
 {
+	pthread_mutex_lock(&g_aerospace_mutex);
+
 	if (g_config.skip_empty || g_config.wrap_around) {
 		char* workspaces = aerospace_list_workspaces(g_aerospace, !g_config.skip_empty);
 		if (!workspaces) {
 			fprintf(stderr, "Error: Unable to retrieve workspace list.\n");
+			pthread_mutex_unlock(&g_aerospace_mutex);
 			return;
 		}
 		char* result = aerospace_workspace(g_aerospace, g_config.wrap_around, ws, workspaces);
@@ -43,6 +248,8 @@ static void switch_workspace(const char* ws)
 
 	if (g_config.haptic && g_haptic)
 		haptic_actuate(g_haptic, 3);
+
+	pthread_mutex_unlock(&g_aerospace_mutex);
 }
 
 static void reset_gesture_state(gesture_ctx* ctx)
@@ -132,19 +339,28 @@ static void handle_idle_state(gesture_ctx* ctx, touch* touches, int count,
 	bool fast = fabsf(avg_vel) >= g_config.velocity_pct * FAST_VEL_FACTOR;
 	float need = fast ? g_config.min_travel_fast : g_config.min_travel;
 
-	bool moved = true;
-	for (int i = 0; i < count && moved; ++i)
-		moved &= fabsf(touches[i].x - ctx->base_x[i]) >= need;
+	// Count how many fingers have moved enough (allow some to lag)
+	int moved_count = 0;
+	for (int i = 0; i < count; ++i) {
+		if (fabsf(touches[i].x - ctx->base_x[i]) >= need)
+			moved_count++;
+	}
+	// At least half the fingers should have moved
+	bool moved = (moved_count >= (count + 1) / 2);
 
 	float dx = avg_x - ctx->start_x;
 	float dy = avg_y - ctx->start_y;
 
-	if (moved && (fast || (fabsf(dx) >= ACTIVATE_PCT && fabsf(dx) > fabsf(dy)))) {
-		ctx->state = GS_ARMED;
-		ctx->start_x = avg_x;
-		ctx->start_y = avg_y;
-		ctx->peak_velx = avg_vel;
-		ctx->dir = (avg_vel >= 0) ? 1 : -1;
+	// Arm if moved and horizontal movement dominates
+	if (moved && (fast || fabsf(dx) >= ACTIVATE_PCT || fabsf(avg_vel) >= g_config.velocity_pct * 0.5f)) {
+		// Horizontal must be greater than vertical (original behavior)
+		if (fabsf(dx) > fabsf(dy) || fast) {
+			ctx->state = GS_ARMED;
+			ctx->start_x = avg_x;
+			ctx->start_y = avg_y;
+			ctx->peak_velx = avg_vel;
+			ctx->dir = (avg_vel >= 0) ? 1 : -1;
+		}
 	}
 }
 
@@ -154,7 +370,8 @@ static void handle_armed_state(gesture_ctx* ctx, touch* touches, int count,
 	float dx = avg_x - ctx->start_x;
 	float dy = avg_y - ctx->start_y;
 
-	if (fabsf(dy) > fabsf(dx)) {
+	// Reset if vertical movement exceeds horizontal (with small tolerance for diagonal)
+	if (fabsf(dy) > fabsf(dx) * 1.2f) {
 		reset_gesture_state(ctx);
 		return;
 	}
@@ -179,15 +396,23 @@ static void handle_armed_state(gesture_ctx* ctx, touch* touches, int count,
 		ctx->dir = (avg_vel >= 0) ? 1 : -1;
 	}
 
-	if (fabsf(avg_vel) >= g_config.velocity_pct) {
-		fire_gesture(ctx, avg_vel > 0 ? 1 : -1);
-	} else if (fabsf(dx) >= g_config.distance_pct && fabsf(avg_vel) <= g_config.velocity_pct * g_config.settle_factor) {
+	// Fire based on distance
+	if (fabsf(dx) >= g_config.distance_pct) {
+		fire_gesture(ctx, dx > 0 ? 1 : -1);
+	}
+	// Or fire on fast intentional swipes (for medium/high sensitivity)
+	// Must reach at least fast_distance_factor of the threshold distance
+	else if (fabsf(avg_vel) >= g_config.fast_velocity_threshold &&
+	         fabsf(dx) >= g_config.distance_pct * g_config.fast_distance_factor) {
 		fire_gesture(ctx, dx > 0 ? 1 : -1);
 	}
 }
 
 static void gestureCallback(touch* touches, int count)
 {
+	if (!g_enabled)
+		return;
+
 	pthread_mutex_lock(&g_gesture_mutex);
 
 	gesture_ctx* ctx = &g_gesture_ctx;
@@ -373,6 +598,15 @@ int main(int argc, const char* argv[])
 
 		event_tap_begin(&g_event_tap, key_handler);
 
-		return NSApplicationMain(argc, argv);
+		// Set up NSApplication with our delegate for menu bar
+		NSApplication *app = [NSApplication sharedApplication];
+		AppDelegate *delegate = [[AppDelegate alloc] init];
+		app.delegate = delegate;
+
+		// Activate as accessory (menu bar only, no dock icon)
+		[app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+
+		[app run];
+		return 0;
 	}
 }
