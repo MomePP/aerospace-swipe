@@ -3,6 +3,7 @@ CFLAGS = -std=c99 -O3 -march=native -flto -fomit-frame-pointer -funroll-loops -g
 FRAMEWORKS = -framework CoreFoundation -framework IOKit -F/System/Library/PrivateFrameworks -framework MultitouchSupport -framework ApplicationServices -framework Cocoa
 LDLIBS = -ldl
 TARGET = swipe
+VERSION = 1.0.0
 
 LAUNCH_AGENTS_DIR = $(HOME)/Library/LaunchAgents
 PLIST_FILE = com.acsandmann.swipe.plist
@@ -43,6 +44,10 @@ bundle: $(BINARY)
 	@echo '    <string>com.example.swipe</string>' >> $(INFO_PLIST)
 	@echo '    <key>CFBundleName</key>' >> $(INFO_PLIST)
 	@echo '    <string>$(BINARY_NAME)</string>' >> $(INFO_PLIST)
+	@echo '    <key>CFBundleShortVersionString</key>' >> $(INFO_PLIST)
+	@echo '    <string>$(VERSION)</string>' >> $(INFO_PLIST)
+	@echo '    <key>CFBundleVersion</key>' >> $(INFO_PLIST)
+	@echo '    <string>$(VERSION)</string>' >> $(INFO_PLIST)
 	@echo '    <key>CFBundlePackageType</key>' >> $(INFO_PLIST)
 	@echo '    <string>APPL</string>' >> $(INFO_PLIST)
 	@echo '    <key>NSPrincipalClass</key>' >> $(INFO_PLIST)
