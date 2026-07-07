@@ -1,12 +1,13 @@
 #include <errno.h>
+#include <pthread.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -17,6 +18,13 @@
 #define READ_BUFFER_SIZE 8192
 #define SOCKET_CONNECT_MAX_ATTEMPTS 30
 #define SOCKET_CONNECT_RETRY_USEC 1000000
+
+// AeroSpace's Unix-socket wire protocol (Sources/Common/util/NWConnectionEx.swift,
+// Sources/Common/model/clientServer.swift upstream): on connect, both sides
+// exchange a raw 4-byte little-endian version handshake; every request/response
+// after that is a 4-byte little-endian length prefix followed by that many bytes
+// of JSON. There is no newline delimiter and no incremental JSON scanning.
+#define SOCKET_PROTOCOL_VERSION 1u
 
 static const char* ERROR_SOCKET_CREATE = "Failed to create Unix domain socket";
 static const char* ERROR_SOCKET_RECEIVE = "Failed to receive data from socket";
@@ -29,8 +37,13 @@ struct aerospace {
 	char* socket_path;
 	bool use_cli_fallback;
 	char read_buf[READ_BUFFER_SIZE];
-	size_t read_buf_len;
 };
+
+// Serializes socket I/O on the shared client connection. fire_gesture()
+// dispatches switch_workspace() onto the global concurrent GCD queue, so
+// back-to-back swipes can otherwise race on the same fd/read_buf and
+// corrupt the JSON protocol, permanently breaking the connection.
+static pthread_mutex_t g_socket_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void fatal_error(const char* fmt, ...)
 {
@@ -74,6 +87,86 @@ static char* get_default_socket_path(void)
 	char* path = malloc(len + 1);
 	snprintf(path, len + 1, "/tmp/bobko.aerospace-%s.sock", username);
 	return path;
+}
+
+static bool write_exact(int fd, const uint8_t* buf, size_t n)
+{
+	size_t sent = 0;
+	while (sent < n) {
+		ssize_t w = write(fd, buf + sent, n - sent);
+		if (w <= 0)
+			return false;
+		sent += (size_t)w;
+	}
+	return true;
+}
+
+static bool read_exact(int fd, uint8_t* buf, size_t n)
+{
+	size_t got = 0;
+	while (got < n) {
+		ssize_t r = read(fd, buf + got, n - got);
+		if (r <= 0)
+			return false;
+		got += (size_t)r;
+	}
+	return true;
+}
+
+static void put_le_u32(uint8_t* out, uint32_t v)
+{
+	out[0] = (uint8_t)(v);
+	out[1] = (uint8_t)(v >> 8);
+	out[2] = (uint8_t)(v >> 16);
+	out[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get_le_u32(const uint8_t* in)
+{
+	return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16) | ((uint32_t)in[3] << 24);
+}
+
+// AeroSpace closes the connection immediately if this handshake doesn't
+// happen first, or if the versions don't match.
+static bool aerospace_handshake(int fd)
+{
+	uint8_t buf[4];
+	put_le_u32(buf, SOCKET_PROTOCOL_VERSION);
+	if (!write_exact(fd, buf, 4))
+		return false;
+	if (!read_exact(fd, buf, 4))
+		return false;
+	return get_le_u32(buf) == SOCKET_PROTOCOL_VERSION;
+}
+
+// Re-dials client->socket_path after the connection has broken (e.g. a
+// racing writer corrupted the protocol and AeroSpace closed the socket).
+// Single attempt, no backoff: by this point AeroSpace is already up, so a
+// long retry loop like aerospace_new()'s startup one isn't needed here.
+static bool aerospace_reconnect(aerospace* client)
+{
+	if (client->fd >= 0) {
+		close(client->fd);
+		client->fd = -1;
+	}
+
+	struct sockaddr_un addr;
+	memset(&addr, 0, sizeof(struct sockaddr_un));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, client->socket_path, sizeof(addr.sun_path) - 1);
+	addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
+
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		return false;
+
+	if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0 || !aerospace_handshake(fd)) {
+		close(fd);
+		return false;
+	}
+
+	client->fd = fd;
+	return true;
 }
 
 static char* execute_cli_command(const char* command_string)
@@ -181,73 +274,77 @@ static char* execute_aerospace_command(aerospace* client, const char** args, int
 		fatal_error(ERROR_JSON_PRINT);
 	}
 
-	struct iovec iov[2];
-	char newline = '\n';
-	iov[0].iov_base = (void*)json_str;
-	iov[0].iov_len = len;
-	iov[1].iov_base = &newline;
-	iov[1].iov_len = 1;
+	pthread_mutex_lock(&g_socket_mutex);
 
-	if (writev(client->fd, iov, 2) < 0) {
-		perror("writev failed");
-	}
-	free((void*)json_str);
+	char* result = NULL;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		uint8_t len_prefix[4];
+		put_le_u32(len_prefix, (uint32_t)len);
 
-	yyjson_doc* resp_doc = NULL;
-	yyjson_read_err err;
-	size_t parsed_bytes = 0;
+		bool sent = write_exact(client->fd, len_prefix, 4) && write_exact(client->fd, (const uint8_t*)json_str, len);
+		if (!sent) {
+			fprintf(stderr, "Failed to send request to socket\n");
+			if (attempt == 0 && aerospace_reconnect(client))
+				continue;
+			break;
+		}
 
-	while (true) {
-		if (client->read_buf_len > 0) {
-			resp_doc = yyjson_read_opts(client->read_buf, client->read_buf_len, YYJSON_READ_STOP_WHEN_DONE, NULL, &err);
-			if (resp_doc) {
-				parsed_bytes = yyjson_doc_get_read_size(resp_doc);
-				break;
+		uint8_t resp_len_buf[4];
+		if (!read_exact(client->fd, resp_len_buf, 4)) {
+			fprintf(stderr, "%s\n", ERROR_SOCKET_RECEIVE);
+			if (attempt == 0 && aerospace_reconnect(client))
+				continue;
+			break;
+		}
+
+		uint32_t resp_len = get_le_u32(resp_len_buf);
+		if (resp_len > READ_BUFFER_SIZE) {
+			fprintf(stderr, "Error: Response too large (%u bytes)\n", resp_len);
+			break;
+		}
+
+		if (!read_exact(client->fd, (uint8_t*)client->read_buf, resp_len)) {
+			fprintf(stderr, "%s\n", ERROR_SOCKET_RECEIVE);
+			if (attempt == 0 && aerospace_reconnect(client))
+				continue;
+			break;
+		}
+
+		yyjson_doc* resp_doc = yyjson_read_opts(client->read_buf, resp_len, 0, NULL, NULL);
+		if (!resp_doc) {
+			fprintf(stderr, "Error: Failed to parse server response\n");
+			break;
+		}
+
+		yyjson_val* resp_root = yyjson_doc_get_root(resp_doc);
+		int exitCode = -1;
+		yyjson_val* exitCodeItem = yyjson_obj_get(resp_root, "exitCode");
+		if (yyjson_is_int(exitCodeItem)) {
+			exitCode = (int)yyjson_get_int(exitCodeItem);
+		} else {
+			fprintf(stderr, "Response does not contain valid %s field\n", "exitCode");
+			yyjson_doc_free(resp_doc);
+			break;
+		}
+
+		if (exitCode != 0) {
+			yyjson_val* output_item = yyjson_obj_get(resp_root, "stderr");
+			if (yyjson_is_str(output_item)) {
+				result = strdup(yyjson_get_str(output_item));
+			}
+		} else if (expected_output_field) {
+			yyjson_val* output_item = yyjson_obj_get(resp_root, expected_output_field);
+			if (yyjson_is_str(output_item)) {
+				result = strdup(yyjson_get_str(output_item));
 			}
 		}
-		if (client->read_buf_len >= READ_BUFFER_SIZE) {
-			fprintf(stderr, "Error: Read buffer overflow, clearing buffer.\n");
-			client->read_buf_len = 0;
-			return NULL;
-		}
-		ssize_t bytes_read = read(client->fd, client->read_buf + client->read_buf_len, READ_BUFFER_SIZE - client->read_buf_len);
-		if (bytes_read <= 0) {
-			fprintf(stderr, "%s\n", ERROR_SOCKET_RECEIVE);
-			return NULL;
-		}
-		client->read_buf_len += bytes_read;
-	}
 
-	if (client->read_buf_len > parsed_bytes) {
-		memmove(client->read_buf, client->read_buf + parsed_bytes, client->read_buf_len - parsed_bytes);
-	}
-	client->read_buf_len -= parsed_bytes;
-
-	yyjson_val* resp_root = yyjson_doc_get_root(resp_doc);
-	char* result = NULL;
-	int exitCode = -1;
-	yyjson_val* exitCodeItem = yyjson_obj_get(resp_root, "exitCode");
-	if (yyjson_is_int(exitCodeItem)) {
-		exitCode = (int)yyjson_get_int(exitCodeItem);
-	} else {
-		fprintf(stderr, "Response does not contain valid %s field\n", "exitCode");
 		yyjson_doc_free(resp_doc);
-		return NULL;
+		break;
 	}
 
-	if (exitCode != 0) {
-		yyjson_val* output_item = yyjson_obj_get(resp_root, "stderr");
-		if (yyjson_is_str(output_item)) {
-			result = strdup(yyjson_get_str(output_item));
-		}
-	} else if (expected_output_field) {
-		yyjson_val* output_item = yyjson_obj_get(resp_root, expected_output_field);
-		if (yyjson_is_str(output_item)) {
-			result = strdup(yyjson_get_str(output_item));
-		}
-	}
-
-	yyjson_doc_free(resp_doc);
+	pthread_mutex_unlock(&g_socket_mutex);
+	free((void*)json_str);
 	return result;
 }
 
@@ -256,7 +353,6 @@ aerospace* aerospace_new(const char* socketPath)
 	aerospace* client = malloc(sizeof(aerospace));
 	client->fd = -1;
 	client->use_cli_fallback = false;
-	client->read_buf_len = 0;
 
 	if (socketPath)
 		client->socket_path = strdup(socketPath);
@@ -285,11 +381,11 @@ aerospace* aerospace_new(const char* socketPath)
 		}
 
 		errno = 0;
-		if (connect(client->fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+		if (connect(client->fd, (struct sockaddr*)&addr, sizeof(addr)) == 0 && aerospace_handshake(client->fd)) {
 			connect_errno = 0;
 			break;
 		}
-		connect_errno = errno;
+		connect_errno = errno ? errno : EPROTO;
 		close(client->fd);
 		client->fd = -1;
 		if (attempt + 1 < SOCKET_CONNECT_MAX_ATTEMPTS) {
