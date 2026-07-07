@@ -23,3 +23,9 @@ Swipe.app
 AerospaceSwipe.app
 AeroSpaceSwipe.app
 swipe.dSYM
+
+# Test binary (make test)
+test_touch_slots
+
+# Local git worktrees
+.worktrees/
