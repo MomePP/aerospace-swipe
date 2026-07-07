@@ -35,6 +35,7 @@ typedef struct {
 	double timestamp;
 	double velocity;
 	bool is_palm;
+	int slot; // stable per-finger index from touch_slot_acquire(), or -1
 } touch;
 
 typedef struct {

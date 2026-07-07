@@ -71,6 +71,7 @@ void touch_slot_release(const void* identity)
 	nt.timestamp = [[touchObj valueForKey:@"timestamp"] doubleValue];
 
 	id touchIdentity = [touchObj identity];
+	nt.slot = touch_slot_acquire((__bridge const void*)(touchIdentity));
 
 	if (!touchStates) {
 		touchStates = CFDictionaryCreateMutable(NULL, 0,
@@ -102,6 +103,7 @@ void touch_slot_release(const void* identity)
 		CFDictionaryRemoveValue(touchStates, (__bridge const void*)(touchIdentity));
 		if (state)
 			free(state);
+		touch_slot_release((__bridge const void*)(touchIdentity));
 	}
 
 	return nt;
