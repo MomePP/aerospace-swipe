@@ -14,6 +14,14 @@
 extern const char* get_name_for_pid(uint64_t pid);
 extern char* string_copy(char* s);
 
+// Maps an NSTouch.identity to a stable per-finger slot in [0, MAX_TOUCHES).
+// Unlike NSSet enumeration order (which is not guaranteed stable across
+// separate gesture callbacks), the returned slot is stable for the whole
+// lifetime of one physical finger's contact — acquiring the same identity
+// twice returns the same slot until it's released.
+int touch_slot_acquire(const void* identity);
+void touch_slot_release(const void* identity);
+
 struct event_tap {
 	CFMachPortRef handle;
 	CFRunLoopSourceRef runloop_source;

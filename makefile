@@ -20,7 +20,7 @@ INFO_PLIST = $(APP_CONTENTS)/Info.plist
 
 ABS_TARGET_PATH = $(shell pwd)/$(APP_MACOS)/$(BINARY_NAME)
 
-.PHONY: all clean sign install_plist load_plist uninstall_plist install uninstall
+.PHONY: all clean sign install_plist load_plist uninstall_plist install uninstall test
 
 ifeq ($(shell uname -sm),Darwin arm64)
 	ARCH= -arch arm64
@@ -64,6 +64,14 @@ all: $(TARGET)
 $(TARGET): $(SRC_FILES)
 	$(CC) $(CFLAGS) $(ARCH) -o $(TARGET) $(SRC_FILES) $(FRAMEWORKS) $(LDLIBS)
 
+TEST_TARGET = test_touch_slots
+
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+$(TEST_TARGET): src/event_tap.m test/test_touch_slots.m
+	$(CC) $(CFLAGS) $(ARCH) -o $(TEST_TARGET) src/event_tap.m test/test_touch_slots.m $(FRAMEWORKS) $(LDLIBS)
+
 sign: $(TARGET)
 	@echo "Signing $(TARGET) with accessibility entitlement..."
 	codesign --entitlements accessibility.entitlements --sign - $(TARGET)
@@ -98,4 +106,4 @@ format:
 	clang-format -i -- **/**.c **/**.h **/**.m
 
 clean:
-	rm -rf $(TARGET) $(APP_BUNDLE)
+	rm -rf $(TARGET) $(APP_BUNDLE) $(TEST_TARGET)

@@ -8,6 +8,54 @@
 
 struct event_tap g_event_tap = { 0 };
 
+// identity -> (slot + 1), so 0 unambiguously means "not present" in the
+// CFDictionary lookup below. Values are stuffed directly into the
+// pointer-sized slot (no malloc) since kCFTypeDictionaryKeyCallBacks only
+// needs real retain/release semantics for the *keys* (the NSTouch identity
+// objects), not these plain integers.
+static CFMutableDictionaryRef g_touch_slots = NULL;
+static bool g_slot_in_use[MAX_TOUCHES] = { false };
+
+int touch_slot_acquire(const void* identity)
+{
+	if (!g_touch_slots) {
+		g_touch_slots = CFDictionaryCreateMutable(NULL, 0,
+			&kCFTypeDictionaryKeyCallBacks,
+			NULL);
+	}
+
+	const void* existing = CFDictionaryGetValue(g_touch_slots, identity);
+	if (existing) {
+		return (int)(intptr_t)existing - 1;
+	}
+
+	for (int slot = 0; slot < MAX_TOUCHES; ++slot) {
+		if (!g_slot_in_use[slot]) {
+			g_slot_in_use[slot] = true;
+			CFDictionarySetValue(g_touch_slots, identity, (const void*)(intptr_t)(slot + 1));
+			return slot;
+		}
+	}
+
+	return -1;
+}
+
+void touch_slot_release(const void* identity)
+{
+	if (!g_touch_slots)
+		return;
+
+	const void* existing = CFDictionaryGetValue(g_touch_slots, identity);
+	if (!existing)
+		return;
+
+	int slot = (int)(intptr_t)existing - 1;
+	if (slot >= 0 && slot < MAX_TOUCHES)
+		g_slot_in_use[slot] = false;
+
+	CFDictionaryRemoveValue(g_touch_slots, identity);
+}
+
 @implementation TouchConverter
 
 + (touch)convert_nstouch:(id)nsTouch
