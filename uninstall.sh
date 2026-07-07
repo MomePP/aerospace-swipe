@@ -2,7 +2,7 @@
 
 set -e
 
-REPO="acsandmann/aerospace-swipe"
+REPO="MomePP/aerospace-swipe"
 INSTALL_DIR="$HOME/.local/share/aerospace-swipe"
 
 GREEN='\033[0;32m'

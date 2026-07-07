@@ -33,23 +33,25 @@ config file is optional and only needed if you want to change the default settin
 ```
 
 ## installation
-### script
-```bash
-curl -sSL https://raw.githubusercontent.com/acsandmann/aerospace-swipe/main/install.sh | bash
-```
-### manual
-   ```bash
-   git clone https://github.com/acsandmann/aerospace-swipe.git
-   cd aerospace-swipe
+> this fork ([MomePP/aerospace-swipe](https://github.com/MomePP/aerospace-swipe)) is private, so the plain
+> `curl | bash` one-liner won't work — `raw.githubusercontent.com` can't authenticate against a private repo.
+> Clone with `gh` (already logged in) or SSH (key added to your GitHub account) instead, then run the script
+> from inside the checkout.
 
-   make install # installs a launchd service
-   ```
-## uninstallation
-### script
+### via gh CLI
 ```bash
-curl -sSL https://raw.githubusercontent.com/acsandmann/aerospace-swipe/main/uninstall.sh | bash
+gh repo clone MomePP/aerospace-swipe
+cd aerospace-swipe
+./install.sh # or: make install
 ```
-### manual
+### via SSH
 ```bash
-make uninstall
+git clone git@github.com:MomePP/aerospace-swipe.git
+cd aerospace-swipe
+./install.sh # or: make install
+```
+## uninstallation
+```bash
+cd aerospace-swipe # wherever you cloned it, e.g. ~/.local/share/aerospace-swipe
+./uninstall.sh # or: make uninstall
 ```
