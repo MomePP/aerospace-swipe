@@ -15,6 +15,11 @@ static pthread_mutex_t g_gesture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static gesture_ctx g_gesture_ctx = { 0 };
 static CFMutableDictionaryRef g_tracks = NULL;
 
+// Frames are dispatched here in delivery order, one at a time — required
+// since gesture processing sums displacement across frames and a
+// concurrent queue does not guarantee FIFO delivery under contention.
+static dispatch_queue_t g_gesture_queue;
+
 // fire_gesture() dispatches this onto the global concurrent GCD queue, so
 // back-to-back swipes can call switch_workspace() from different threads at
 // once. Without this lock, the list-workspaces + workspace-switch pair could
@@ -484,7 +489,7 @@ static void process_touches(NSSet<NSTouch*>* touches)
 	NSUInteger i = 0;
 
 	for (NSTouch* touch in touches) {
-		if (touch.phase != (1 << 2)) {
+		if (touch.phase != END_PHASE) {
 			if (i >= buf_capacity) {
 				buf_capacity *= 2;
 				buf = realloc(buf, sizeof(touch) * buf_capacity);
@@ -493,7 +498,7 @@ static void process_touches(NSSet<NSTouch*>* touches)
 		}
 	}
 
-	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+	dispatch_async(g_gesture_queue, ^{
 		gestureCallback(buf, (int)i);
 		free(buf);
 	});
@@ -620,6 +625,8 @@ int main(int argc, const char* argv[])
 		g_tracks = CFDictionaryCreateMutable(NULL, 0,
 			&kCFTypeDictionaryKeyCallBacks,
 			NULL);
+
+		g_gesture_queue = dispatch_queue_create("aerospace-swipe.gesture", DISPATCH_QUEUE_SERIAL);
 
 		event_tap_begin(&g_event_tap, key_handler);
 
