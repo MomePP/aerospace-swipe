@@ -5,6 +5,11 @@ LDLIBS = -ldl
 TARGET = swipe
 VERSION = 1.1.1
 
+# Prefer a stable local self-signed identity (see setup-codesign-identity.sh) so
+# Accessibility permission survives rebuilds; fall back to ad-hoc signing (e.g. on CI)
+# when no such identity exists in the keychain.
+SIGN_IDENTITY := $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "AerospaceSwipe Local Signing" && echo "AerospaceSwipe Local Signing" || echo -)
+
 LAUNCH_AGENTS_DIR = $(HOME)/Library/LaunchAgents
 PLIST_FILE = com.acsandmann.swipe.plist
 PLIST_TEMPLATE = com.acsandmann.swipe.plist.in
@@ -62,7 +67,7 @@ bundle: $(BINARY)
 	@echo '</dict>' >> $(INFO_PLIST)
 	@echo '</plist>' >> $(INFO_PLIST)
 	@echo "APPL????" > $(APP_CONTENTS)/PkgInfo
-	codesign --entitlements accessibility.entitlements --sign - $(APP_BUNDLE)
+	codesign --entitlements accessibility.entitlements --sign "$(SIGN_IDENTITY)" $(APP_BUNDLE)
 
 all: $(TARGET)
 
@@ -89,7 +94,7 @@ $(CONFIG_TEST_TARGET): src/yyjson.c test/test_config.c
 
 sign: $(TARGET)
 	@echo "Signing $(TARGET) with accessibility entitlement..."
-	codesign --entitlements accessibility.entitlements --sign - $(TARGET)
+	codesign --entitlements accessibility.entitlements --sign "$(SIGN_IDENTITY)" $(TARGET)
 
 install_plist:
 	@echo "Generating launch agent plist with binary path $(ABS_TARGET_PATH)..."
