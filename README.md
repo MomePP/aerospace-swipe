@@ -1,5 +1,7 @@
 # aerospace workspace switching with trackpad swipes
 
+<img src="Resources/AppIcon.png" width="96" align="right" alt="AerospaceSwipe icon">
+
 aerospace-swipe detects x-fingered(defaults to 3) swipes on your trackpad and correspondingly switches between [aerospace](https://github.com/nikitabobko/AeroSpace) workspaces.
 
 ## features
