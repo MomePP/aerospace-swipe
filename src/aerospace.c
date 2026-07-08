@@ -39,9 +39,9 @@ struct aerospace {
 	char read_buf[READ_BUFFER_SIZE];
 };
 
-// Serializes socket I/O on the shared client connection. fire_gesture()
-// dispatches switch_workspace() onto the global concurrent GCD queue, so
-// back-to-back swipes can otherwise race on the same fd/read_buf and
+// Serializes socket I/O on the shared client connection. maybe_dispatch_switch()
+// and fire_single_swipe() both dispatch switch_workspace() onto a workspace
+// queue, so back-to-back swipes can otherwise race on the same fd/read_buf and
 // corrupt the JSON protocol, permanently breaking the connection.
 static pthread_mutex_t g_socket_mutex = PTHREAD_MUTEX_INITIALIZER;
 

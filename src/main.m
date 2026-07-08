@@ -20,10 +20,16 @@ static CFMutableDictionaryRef g_tracks = NULL;
 // concurrent queue does not guarantee FIFO delivery under contention.
 static dispatch_queue_t g_gesture_queue;
 
-// fire_gesture() dispatches this onto the global concurrent GCD queue, so
-// back-to-back swipes can call switch_workspace() from different threads at
-// once. Without this lock, the list-workspaces + workspace-switch pair could
-// interleave with another thread's pair and act on a stale/foreign list.
+// Dedicated to blocking workspace-switch socket I/O, kept separate from
+// g_gesture_queue so I/O never delays frame processing. At most one unit
+// of work is ever outstanding here — see maybe_dispatch_switch().
+static dispatch_queue_t g_workspace_queue;
+
+// maybe_dispatch_switch() and fire_single_swipe() both dispatch onto
+// g_workspace_queue, so back-to-back swipes can call switch_workspace()
+// from different work items at once. Without this lock,
+// the list-workspaces + workspace-switch pair could interleave with
+// another call's pair and act on a stale/foreign list.
 static pthread_mutex_t g_aerospace_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static BOOL g_enabled = YES;
@@ -222,16 +228,27 @@ static BOOL g_enabled = YES;
 
 @end
 
-static void switch_workspace(const char* ws)
+// cached_workspaces lets a caller reuse one aerospace_list_workspaces()
+// snapshot across multiple calls within the same continuous gesture
+// (window-to-workspace assignment doesn't change from focus-switching
+// alone, so a stale-by-milliseconds cache is still correct). Pass a
+// pointer to a caller-owned char* that starts NULL; this function fetches
+// once and fills it in, and reuses it on subsequent calls.
+static void switch_workspace(const char* ws, char** cached_workspaces)
 {
 	pthread_mutex_lock(&g_aerospace_mutex);
 
 	if (g_config.skip_empty || g_config.wrap_around) {
-		char* workspaces = aerospace_list_workspaces(g_aerospace, !g_config.skip_empty);
+		char* workspaces = cached_workspaces ? *cached_workspaces : NULL;
 		if (!workspaces) {
-			fprintf(stderr, "Error: Unable to retrieve workspace list.\n");
-			pthread_mutex_unlock(&g_aerospace_mutex);
-			return;
+			workspaces = aerospace_list_workspaces(g_aerospace, !g_config.skip_empty);
+			if (!workspaces) {
+				fprintf(stderr, "Error: Unable to retrieve workspace list.\n");
+				pthread_mutex_unlock(&g_aerospace_mutex);
+				return;
+			}
+			if (cached_workspaces)
+				*cached_workspaces = workspaces;
 		}
 		char* result = aerospace_workspace(g_aerospace, g_config.wrap_around, ws, workspaces);
 		if (result) {
@@ -239,7 +256,8 @@ static void switch_workspace(const char* ws)
 		} else {
 			printf("Switched workspace successfully to '%s'.\n", ws);
 		}
-		free(workspaces);
+		if (!cached_workspaces)
+			free(workspaces);
 		free(result);
 	} else {
 		char* result = aerospace_switch(g_aerospace, ws);
@@ -260,19 +278,80 @@ static void switch_workspace(const char* ws)
 static void reset_gesture_state(gesture_ctx* ctx)
 {
 	ctx->state = GS_IDLE;
-	ctx->last_fire_dir = 0;
+	ctx->axis = AXIS_UNDECIDED;
+	ctx->acc_dx = 0;
+	ctx->peak_velx = 0;
+	ctx->executed_step = 0;
+
+	// cached_workspace_list is also read/written under g_aerospace_mutex by
+	// switch_workspace() from the workspace-dispatch queue; take the same
+	// lock here so a still-in-flight dispatch never sees the pointer freed
+	// out from under it. switch_workspace() always NULL-checks before use,
+	// so whichever side wins the race, behavior stays correct — the only
+	// possible cost is one redundant re-fetch of the workspace list.
+	pthread_mutex_lock(&g_aerospace_mutex);
+	free(ctx->cached_workspace_list);
+	ctx->cached_workspace_list = NULL;
+	pthread_mutex_unlock(&g_aerospace_mutex);
 }
 
-static void fire_gesture(gesture_ctx* ctx, int direction)
+// At most one dispatch is ever outstanding: if one is already converging
+// toward the target, this is a no-op — that dispatch re-reads the target
+// fresh on every iteration, so it will pick up any further change without
+// a second dispatch being scheduled. This bounds the backlog under rapid
+// swiping without ever silently dropping a step (workspace next/prev are
+// relative commands — a dropped step is a permanently wrong landing spot).
+static void maybe_dispatch_switch(gesture_ctx* ctx)
 {
-	if (direction == ctx->last_fire_dir)
+	if (ctx->dispatch_in_flight)
+		return;
+	ctx->dispatch_in_flight = true;
+
+	dispatch_async(g_workspace_queue, ^{
+		for (;;) {
+			pthread_mutex_lock(&g_gesture_mutex);
+			int target = compute_target_step(ctx->acc_dx, g_config.distance_pct, g_config.max_steps);
+			int delta = target - ctx->executed_step;
+			pthread_mutex_unlock(&g_gesture_mutex);
+
+			if (delta == 0)
+				break;
+
+			int step_dir = delta > 0 ? 1 : -1;
+			switch_workspace(step_dir > 0 ? g_config.swipe_right : g_config.swipe_left,
+				&ctx->cached_workspace_list);
+
+			pthread_mutex_lock(&g_gesture_mutex);
+			ctx->executed_step += step_dir;
+			pthread_mutex_unlock(&g_gesture_mutex);
+		}
+
+		pthread_mutex_lock(&g_gesture_mutex);
+		ctx->dispatch_in_flight = false;
+		pthread_mutex_unlock(&g_gesture_mutex);
+	});
+}
+
+// multi_swipe == false path: fire exactly one step, only at gesture
+// release (called from gestureCallback when count == 0). Mirrors
+// SwipeAeroSpace's own single-swipe fallback — no live mid-gesture
+// feedback in this mode. Tried firing live instead (while fingers were
+// still down, for haptic perceptibility) but it felt worse in practice —
+// reverted to release-based firing per explicit testing feedback.
+static void fire_single_swipe(gesture_ctx* ctx)
+{
+	bool fast = fabsf(ctx->peak_velx) >= g_config.fast_velocity_threshold;
+	float need = fast ? g_config.distance_pct * g_config.fast_distance_factor : g_config.distance_pct;
+
+	if (fabsf(ctx->acc_dx) < need)
 		return;
 
-	ctx->last_fire_dir = direction;
-	ctx->state = GS_COMMITTED;
+	int step_dir = ctx->acc_dx > 0 ? 1 : -1;
+	const char* ws = step_dir > 0 ? g_config.swipe_right : g_config.swipe_left;
+	char** cache = &ctx->cached_workspace_list;
 
-	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-		switch_workspace(direction > 0 ? g_config.swipe_right : g_config.swipe_left);
+	dispatch_async(g_workspace_queue, ^{
+		switch_workspace(ws, cache);
 	});
 }
 
@@ -304,120 +383,50 @@ static void calculate_touch_averages(touch* touches, int count,
 	*avg_vel /= count;
 }
 
-static bool handle_committed_state(gesture_ctx* ctx, touch* touches, int count)
+static void handle_idle_state(gesture_ctx* ctx, touch* touches, int count, float avg_x, float avg_y)
 {
-	bool all_ended = true;
-	for (int i = 0; i < count; ++i) {
-		if (touches[i].phase != END_PHASE) {
-			all_ended = false;
-			break;
-		}
-	}
+	ctx->state = GS_TRACKING;
+	ctx->axis = AXIS_UNDECIDED;
+	ctx->acc_dx = 0;
+	ctx->peak_velx = 0;
+	ctx->executed_step = 0;
+	ctx->start_x = avg_x;
+	ctx->start_y = avg_y;
 
-	if (!count || all_ended) {
-		reset_gesture_state(ctx);
-		return true;
-	}
-
-	float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
-	calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,
-		&min_x, &max_x, &min_y, &max_y);
-
-	float dx = avg_x - ctx->start_x;
-	if ((dx * ctx->last_fire_dir) < 0 && fabsf(dx) >= g_config.min_travel) {
-		ctx->state = GS_ARMED;
-		ctx->start_x = avg_x;
-		ctx->start_y = avg_y;
-		ctx->peak_velx = avg_vel;
-		ctx->dir = (avg_vel >= 0) ? 1 : -1;
-
-		for (int i = 0; i < count; ++i) {
-			if (touches[i].slot < 0)
-				continue;
-			ctx->base_x[touches[i].slot] = touches[i].x;
-		}
-	}
-
-	return true;
-}
-
-static void handle_idle_state(gesture_ctx* ctx, touch* touches, int count,
-	float avg_x, float avg_y, float avg_vel)
-{
-	bool fast = fabsf(avg_vel) >= g_config.velocity_pct * FAST_VEL_FACTOR;
-	float need = fast ? g_config.min_travel_fast : g_config.min_travel;
-
-	// Count how many fingers have moved enough (allow some to lag)
-	int moved_count = 0;
 	for (int i = 0; i < count; ++i) {
 		if (touches[i].slot < 0)
 			continue;
-		if (fabsf(touches[i].x - ctx->base_x[touches[i].slot]) >= need)
-			moved_count++;
-	}
-	// At least half the fingers should have moved
-	bool moved = (moved_count >= (count + 1) / 2);
-
-	float dx = avg_x - ctx->start_x;
-	float dy = avg_y - ctx->start_y;
-
-	// Arm if moved and horizontal movement dominates
-	if (moved && (fast || fabsf(dx) >= ACTIVATE_PCT || fabsf(avg_vel) >= g_config.velocity_pct * 0.5f)) {
-		// Horizontal must be greater than vertical (original behavior)
-		if (fabsf(dx) > fabsf(dy) || fast) {
-			ctx->state = GS_ARMED;
-			ctx->start_x = avg_x;
-			ctx->start_y = avg_y;
-			ctx->peak_velx = avg_vel;
-			ctx->dir = (avg_vel >= 0) ? 1 : -1;
-		}
+		ctx->prev_x[touches[i].slot] = touches[i].x;
 	}
 }
 
-static void handle_armed_state(gesture_ctx* ctx, touch* touches, int count,
+static void handle_tracking_state(gesture_ctx* ctx, touch* touches, int count,
 	float avg_x, float avg_y, float avg_vel)
 {
-	float dx = avg_x - ctx->start_x;
-	float dy = avg_y - ctx->start_y;
+	float frame_dx = 0;
+	int moved = 0;
+	for (int i = 0; i < count; ++i) {
+		if (touches[i].slot < 0)
+			continue;
+		frame_dx += touches[i].x - ctx->prev_x[touches[i].slot];
+		ctx->prev_x[touches[i].slot] = touches[i].x;
+		moved++;
+	}
+	if (moved > 0)
+		ctx->acc_dx += frame_dx / moved;
 
-	// Reset if vertical movement exceeds horizontal (with small tolerance for diagonal)
-	if (fabsf(dy) > fabsf(dx) * 1.2f) {
-		reset_gesture_state(ctx);
+	if (fabsf(avg_vel) > fabsf(ctx->peak_velx))
+		ctx->peak_velx = avg_vel;
+
+	if (ctx->axis == AXIS_UNDECIDED)
+		ctx->axis = decide_axis(avg_x - ctx->start_x, avg_y - ctx->start_y, ACTIVATE_PCT);
+
+	if (ctx->axis != AXIS_HORIZONTAL || !g_config.multi_swipe)
 		return;
-	}
 
-	bool fast = fabsf(avg_vel) >= g_config.velocity_pct * FAST_VEL_FACTOR;
-	float stepReq = fast ? g_config.min_step_fast : g_config.min_step;
-
-	int mismatch_count = 0;
-	for (int i = 0; i < count; ++i) {
-		if (touches[i].slot < 0)
-			continue;
-		float ddx = touches[i].x - ctx->prev_x[touches[i].slot];
-		if (fabsf(ddx) < stepReq || (ddx * dx) < 0) {
-			mismatch_count++;
-			if (mismatch_count > g_config.swipe_tolerance) {
-				reset_gesture_state(ctx);
-				return;
-			}
-		}
-	}
-
-	if (fabsf(avg_vel) > fabsf(ctx->peak_velx)) {
-		ctx->peak_velx = avg_vel;
-		ctx->dir = (avg_vel >= 0) ? 1 : -1;
-	}
-
-	// Fire based on distance
-	if (fabsf(dx) >= g_config.distance_pct) {
-		fire_gesture(ctx, dx > 0 ? 1 : -1);
-	}
-	// Or fire on fast intentional swipes (for medium/high sensitivity)
-	// Must reach at least fast_distance_factor of the threshold distance
-	else if (fabsf(avg_vel) >= g_config.fast_velocity_threshold &&
-	         fabsf(dx) >= g_config.distance_pct * g_config.fast_distance_factor) {
-		fire_gesture(ctx, dx > 0 ? 1 : -1);
-	}
+	int target = compute_target_step(ctx->acc_dx, g_config.distance_pct, g_config.max_steps);
+	if (target != ctx->executed_step)
+		maybe_dispatch_switch(ctx);
 }
 
 static void gestureCallback(touch* touches, int count)
@@ -429,53 +438,39 @@ static void gestureCallback(touch* touches, int count)
 
 	gesture_ctx* ctx = &g_gesture_ctx;
 
-	if (ctx->state == GS_COMMITTED) {
-		if (handle_committed_state(ctx, touches, count))
-			goto unlock;
-	}
-
-	if (count != g_config.fingers) {
-		if (ctx->state == GS_ARMED) {
-			ctx->miscount_frames++;
-			if (ctx->miscount_frames > MISCOUNT_GRACE_FRAMES) {
-				ctx->state = GS_IDLE;
-				ctx->miscount_frames = 0;
-			} else {
-				// Tolerate a brief miscount frame: skip updating history
-				// this frame instead of resetting armed progress, so a
-				// finger landing a beat late or a fifth incidental touch
-				// doesn't throw away a real in-progress swipe.
-				goto unlock;
-			}
-		}
-
-		for (int i = 0; i < count; ++i) {
-			if (touches[i].slot < 0)
-				continue;
-			ctx->prev_x[touches[i].slot] = ctx->base_x[touches[i].slot] = touches[i].x;
-		}
-
+	if (count == 0) {
+		if (ctx->state == GS_TRACKING && !g_config.multi_swipe
+			&& ctx->axis == AXIS_HORIZONTAL)
+			fire_single_swipe(ctx);
+		reset_gesture_state(ctx);
 		goto unlock;
 	}
 
-	ctx->miscount_frames = 0;
-
-	float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
-	calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,
-		&min_x, &max_x, &min_y, &max_y);
-
 	if (ctx->state == GS_IDLE) {
-		handle_idle_state(ctx, touches, count, avg_x, avg_y, avg_vel);
-	} else if (ctx->state == GS_ARMED) {
-		handle_armed_state(ctx, touches, count, avg_x, avg_y, avg_vel);
+		if (count != g_config.fingers) {
+			for (int i = 0; i < count; ++i) {
+				if (touches[i].slot < 0)
+					continue;
+				ctx->prev_x[touches[i].slot] = touches[i].x;
+			}
+			goto unlock;
+		}
+
+		float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
+		calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,
+			&min_x, &max_x, &min_y, &max_y);
+		handle_idle_state(ctx, touches, count, avg_x, avg_y);
+		goto unlock;
 	}
 
-	for (int i = 0; i < count; ++i) {
-		if (touches[i].slot < 0)
-			continue;
-		ctx->prev_x[touches[i].slot] = touches[i].x;
-		if (ctx->state == GS_IDLE)
-			ctx->base_x[touches[i].slot] = touches[i].x;
+	// GS_TRACKING: tolerate finger-count drift (e.g. a transient miscount,
+	// or an extra incidental contact) instead of resetting progress. Only
+	// a true full release (count == 0, handled above) ends the gesture.
+	{
+		float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
+		calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,
+			&min_x, &max_x, &min_y, &max_y);
+		handle_tracking_state(ctx, touches, count, avg_x, avg_y, avg_vel);
 	}
 
 unlock:
@@ -629,6 +624,7 @@ int main(int argc, const char* argv[])
 			NULL);
 
 		g_gesture_queue = dispatch_queue_create("aerospace-swipe.gesture", DISPATCH_QUEUE_SERIAL);
+		g_workspace_queue = dispatch_queue_create("aerospace-swipe.workspace", DISPATCH_QUEUE_SERIAL);
 
 		event_tap_begin(&g_event_tap, key_handler);
 

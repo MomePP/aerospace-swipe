@@ -6,10 +6,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "gesture_math.h"
+
 #define ACTIVATE_PCT 0.05f
 #define END_PHASE 8 // NSTouchPhaseEnded
-#define FAST_VEL_FACTOR 0.80f
-#define MISCOUNT_GRACE_FRAMES 3 // consecutive wrong-count frames tolerated while armed before resetting
 #define MAX_TOUCHES 16
 
 extern const char* get_name_for_pid(uint64_t pid);
@@ -47,18 +47,21 @@ typedef struct {
 
 // Gesture state enumeration
 typedef enum {
-	GS_IDLE,
-	GS_ARMED,
-	GS_COMMITTED
+	GS_IDLE,      // no fingers down / gesture not yet started
+	GS_TRACKING   // fingers down, accumulating displacement
 } gesture_state;
 
 // Gesture context structure
 typedef struct {
 	gesture_state state;
-	float start_x, start_y, peak_velx;
-	int dir, last_fire_dir;
-	float prev_x[MAX_TOUCHES], base_x[MAX_TOUCHES];
-	int miscount_frames; // consecutive frames where touch count != g_config.fingers while GS_ARMED
+	swipe_axis axis;
+	float start_x, start_y;      // average position at gesture start (axis-lock reference)
+	float acc_dx;                // accumulated horizontal displacement this gesture
+	float peak_velx;             // fastest horizontal velocity seen this gesture
+	int executed_step;           // workspace switches actually performed this gesture (signed)
+	float prev_x[MAX_TOUCHES];   // per-slot x position last frame, for delta computation
+	bool dispatch_in_flight;     // at most one switch-dispatch outstanding
+	char* cached_workspace_list; // aerospace_list_workspaces() result, reused for this gesture
 } gesture_ctx;
 
 // Palm rejection tracking structure
