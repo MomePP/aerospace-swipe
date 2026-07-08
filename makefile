@@ -9,7 +9,7 @@ LAUNCH_AGENTS_DIR = $(HOME)/Library/LaunchAgents
 PLIST_FILE = com.acsandmann.swipe.plist
 PLIST_TEMPLATE = com.acsandmann.swipe.plist.in
 
-SRC_FILES = src/aerospace.c src/yyjson.c src/haptic.c src/event_tap.m src/main.m
+SRC_FILES = src/aerospace.c src/yyjson.c src/haptic.c src/gesture_math.c src/event_tap.m src/main.m
 
 BINARY = swipe
 BINARY_NAME = AerospaceSwipe
@@ -65,12 +65,17 @@ $(TARGET): $(SRC_FILES)
 	$(CC) $(CFLAGS) $(ARCH) -o $(TARGET) $(SRC_FILES) $(FRAMEWORKS) $(LDLIBS)
 
 TEST_TARGET = test_touch_slots
+GESTURE_MATH_TEST_TARGET = test_gesture_math
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET)
 	./$(TEST_TARGET)
+	./$(GESTURE_MATH_TEST_TARGET)
 
 $(TEST_TARGET): src/event_tap.m test/test_touch_slots.m
 	$(CC) $(CFLAGS) $(ARCH) -o $(TEST_TARGET) src/event_tap.m test/test_touch_slots.m $(FRAMEWORKS) $(LDLIBS)
+
+$(GESTURE_MATH_TEST_TARGET): src/gesture_math.c test/test_gesture_math.c
+	$(CC) -std=c99 -O0 -g -Wall -Wextra -o $(GESTURE_MATH_TEST_TARGET) src/gesture_math.c test/test_gesture_math.c -lm
 
 sign: $(TARGET)
 	@echo "Signing $(TARGET) with accessibility entitlement..."
@@ -106,4 +111,4 @@ format:
 	clang-format -i -- **/**.c **/**.h **/**.m
 
 clean:
-	rm -rf $(TARGET) $(APP_BUNDLE) $(TEST_TARGET)
+	rm -rf $(TARGET) $(APP_BUNDLE) $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET)

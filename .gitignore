@@ -26,6 +26,7 @@ swipe.dSYM
 
 # Test binary (make test)
 test_touch_slots
+test_gesture_math
 
 # Local git worktrees
 .worktrees/
