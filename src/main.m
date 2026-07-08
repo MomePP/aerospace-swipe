@@ -430,8 +430,19 @@ static void gestureCallback(touch* touches, int count)
 	}
 
 	if (count != g_config.fingers) {
-		if (ctx->state == GS_ARMED)
-			ctx->state = GS_IDLE;
+		if (ctx->state == GS_ARMED) {
+			ctx->miscount_frames++;
+			if (ctx->miscount_frames > MISCOUNT_GRACE_FRAMES) {
+				ctx->state = GS_IDLE;
+				ctx->miscount_frames = 0;
+			} else {
+				// Tolerate a brief miscount frame: skip updating history
+				// this frame instead of resetting armed progress, so a
+				// finger landing a beat late or a fifth incidental touch
+				// doesn't throw away a real in-progress swipe.
+				goto unlock;
+			}
+		}
 
 		for (int i = 0; i < count; ++i) {
 			if (touches[i].slot < 0)
@@ -441,6 +452,8 @@ static void gestureCallback(touch* touches, int count)
 
 		goto unlock;
 	}
+
+	ctx->miscount_frames = 0;
 
 	float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
 	calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,

@@ -9,6 +9,7 @@
 #define ACTIVATE_PCT 0.05f
 #define END_PHASE 8 // NSTouchPhaseEnded
 #define FAST_VEL_FACTOR 0.80f
+#define MISCOUNT_GRACE_FRAMES 3 // consecutive wrong-count frames tolerated while armed before resetting
 #define MAX_TOUCHES 16
 
 extern const char* get_name_for_pid(uint64_t pid);
@@ -57,6 +58,7 @@ typedef struct {
 	float start_x, start_y, peak_velx;
 	int dir, last_fire_dir;
 	float prev_x[MAX_TOUCHES], base_x[MAX_TOUCHES];
+	int miscount_frames; // consecutive frames where touch count != g_config.fingers while GS_ARMED
 } gesture_ctx;
 
 // Palm rejection tracking structure
