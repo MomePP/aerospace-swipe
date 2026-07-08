@@ -5,7 +5,8 @@ aerospace-swipe detects x-fingered(defaults to 3) swipes on your trackpad and co
 ## features
 - fast swipe detection and forwarding to aerospace (uses aerospace server's socket instead of cli)
 - works with any number of fingers (default is 3, can be changed in config)
-- adjustable sensitivity (Low/Medium/High) with velocity-based early triggering
+- adjustable sensitivity (Low/Medium/High)
+- multi-step swiping: cross more than one workspace in a single continuous gesture, switching live as you swipe (can be disabled for one-switch-per-gesture instead, with velocity-based early triggering for fast flicks)
 - optional menu bar icon with runtime controls for all settings
 - skips empty workspaces (if enabled in config)
 - ignores your palm if it is resting on the trackpad
@@ -29,7 +30,9 @@ config file is optional and only needed if you want to change the default settin
   "skip_empty": true,
   "fingers": 3,
   "sensitivity": 2,      // 1=Low, 2=Medium, 3=High
-  "show_menu_bar": true  // Show menu bar icon with controls
+  "show_menu_bar": true, // Show menu bar icon with controls
+  "multi_swipe": true,   // Cross multiple workspaces in one continuous gesture, live
+  "max_steps": 5         // Cap on workspaces crossed per gesture when multi_swipe is on
 }
 ```
 
