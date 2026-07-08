@@ -33,6 +33,7 @@ bundle: $(BINARY)
 	mkdir -p $(APP_MACOS)
 	mkdir -p $(APP_CONTENTS)/Resources
 	cp $(BINARY) $(APP_MACOS)/$(BINARY_NAME)
+	cp Resources/AppIcon.icns $(APP_CONTENTS)/Resources/AppIcon.icns
 	@echo "Generating Info.plist..."
 	@echo '<?xml version="1.0" encoding="UTF-8"?>' > $(INFO_PLIST)
 	@echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> $(INFO_PLIST)
@@ -44,6 +45,10 @@ bundle: $(BINARY)
 	@echo '    <string>com.example.swipe</string>' >> $(INFO_PLIST)
 	@echo '    <key>CFBundleName</key>' >> $(INFO_PLIST)
 	@echo '    <string>$(BINARY_NAME)</string>' >> $(INFO_PLIST)
+	@echo '    <key>CFBundleIconFile</key>' >> $(INFO_PLIST)
+	@echo '    <string>AppIcon</string>' >> $(INFO_PLIST)
+	@echo '    <key>CFBundleIconName</key>' >> $(INFO_PLIST)
+	@echo '    <string>AppIcon</string>' >> $(INFO_PLIST)
 	@echo '    <key>CFBundleShortVersionString</key>' >> $(INFO_PLIST)
 	@echo '    <string>$(VERSION)</string>' >> $(INFO_PLIST)
 	@echo '    <key>CFBundleVersion</key>' >> $(INFO_PLIST)
