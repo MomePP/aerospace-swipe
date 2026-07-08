@@ -602,11 +602,13 @@ int main(int argc, const char* argv[])
 		NSLog(@"Accessibility permission granted. Continuing app initialization...");
 
 		g_config = load_config();
-		NSLog(@"Loaded config: fingers=%d, skip_empty=%s, wrap_around=%s, haptic=%s, swipe_left='%s', swipe_right='%s'",
+		NSLog(@"Loaded config: fingers=%d, skip_empty=%s, wrap_around=%s, haptic=%s, multi_swipe=%s, max_steps=%d, swipe_left='%s', swipe_right='%s'",
 			g_config.fingers,
 			g_config.skip_empty ? "YES" : "NO",
 			g_config.wrap_around ? "YES" : "NO",
 			g_config.haptic ? "YES" : "NO",
+			g_config.multi_swipe ? "YES" : "NO",
+			g_config.max_steps,
 			g_config.swipe_left,
 			g_config.swipe_right);
 

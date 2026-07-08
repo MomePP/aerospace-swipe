@@ -30,6 +30,8 @@ typedef struct {
 	float palm_velocity;
 	float fast_distance_factor;   // For fast swipes, trigger at this fraction of distance_pct
 	float fast_velocity_threshold; // Minimum velocity to qualify as "fast"
+	bool multi_swipe;    // fire multiple workspace switches within one continuous gesture
+	int max_steps;       // cap on workspaces crossed per gesture when multi_swipe is on
 	const char* swipe_left;
 	const char* swipe_right;
 } Config;
@@ -87,6 +89,8 @@ static Config default_config()
 	config.palm_velocity = 0.1;      // 10% of pad dimension per second
 	config.fast_distance_factor = 0.60f;   // Fast swipes can trigger at 60% of normal distance
 	config.fast_velocity_threshold = 0.35f; // Velocity needed for fast-trigger
+	config.multi_swipe = true;
+	config.max_steps = 5;
 	config.swipe_left = "prev";
 	config.swipe_right = "next";
 
@@ -203,6 +207,14 @@ static Config load_config()
 	if (item && yyjson_is_int(item)) {
 		apply_sensitivity(&config, (int)yyjson_get_int(item));
 	}
+
+	item = yyjson_obj_get(root, "multi_swipe");
+	if (item && yyjson_is_bool(item))
+		config.multi_swipe = yyjson_get_bool(item);
+
+	item = yyjson_obj_get(root, "max_steps");
+	if (item && yyjson_is_int(item))
+		config.max_steps = (int)yyjson_get_int(item);
 
 	config.swipe_left = config.natural_swipe ? "next" : "prev";
 	config.swipe_right = config.natural_swipe ? "prev" : "next";

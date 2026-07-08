@@ -66,16 +66,21 @@ $(TARGET): $(SRC_FILES)
 
 TEST_TARGET = test_touch_slots
 GESTURE_MATH_TEST_TARGET = test_gesture_math
+CONFIG_TEST_TARGET = test_config
 
-test: $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET)
+test: $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET) $(CONFIG_TEST_TARGET)
 	./$(TEST_TARGET)
 	./$(GESTURE_MATH_TEST_TARGET)
+	./$(CONFIG_TEST_TARGET)
 
 $(TEST_TARGET): src/event_tap.m test/test_touch_slots.m
 	$(CC) $(CFLAGS) $(ARCH) -o $(TEST_TARGET) src/event_tap.m test/test_touch_slots.m $(FRAMEWORKS) $(LDLIBS)
 
 $(GESTURE_MATH_TEST_TARGET): src/gesture_math.c test/test_gesture_math.c
 	$(CC) -std=c99 -O0 -g -Wall -Wextra -o $(GESTURE_MATH_TEST_TARGET) src/gesture_math.c test/test_gesture_math.c -lm
+
+$(CONFIG_TEST_TARGET): src/yyjson.c test/test_config.c
+	$(CC) -std=c99 -O0 -g -Wall -Wextra -framework CoreFoundation -o $(CONFIG_TEST_TARGET) src/yyjson.c test/test_config.c -lm
 
 sign: $(TARGET)
 	@echo "Signing $(TARGET) with accessibility entitlement..."
@@ -111,4 +116,4 @@ format:
 	clang-format -i -- **/**.c **/**.h **/**.m
 
 clean:
-	rm -rf $(TARGET) $(APP_BUNDLE) $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET)
+	rm -rf $(TARGET) $(APP_BUNDLE) $(TEST_TARGET) $(GESTURE_MATH_TEST_TARGET) $(CONFIG_TEST_TARGET)
