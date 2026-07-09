@@ -28,6 +28,9 @@ swipe.dSYM
 test_touch_slots
 test_gesture_math
 test_config
+test_touch_slots.dSYM
+test_gesture_math.dSYM
+test_config.dSYM
 
 # Local git worktrees
 .worktrees/
