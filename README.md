@@ -4,6 +4,11 @@
 
 aerospace-swipe detects x-fingered(defaults to 3) swipes on your trackpad and correspondingly switches between [aerospace](https://github.com/nikitabobko/AeroSpace) workspaces.
 
+> a fork of [acsandmann/aerospace-swipe](https://github.com/acsandmann/aerospace-swipe) — all credit for the
+> original project goes to [@acsandmann](https://github.com/acsandmann). this fork adds stable per-finger touch
+> tracking, continuous multi-step swiping, adjustable sensitivity, a menu bar with runtime controls, an app
+> icon, and a homebrew tap. see [acknowledgements](#acknowledgements).
+
 ## features
 - fast swipe detection and forwarding to aerospace (uses aerospace server's socket instead of cli)
 - works with any number of fingers (default is 3, can be changed in config)
@@ -47,28 +52,13 @@ brew install aerospace-swipe        # stable, pinned to the latest tagged releas
 
 brew services start aerospace-swipe # installs + loads the launchd service
 ```
-> the tap ([MomePP/homebrew-formulae](https://github.com/MomePP/homebrew-formulae)) is public, but the formula
-> builds from source out of this repo, which is **private** — `brew install`/`brew reinstall` needs to `git
-> clone` it, so it only works on a machine with your own GitHub auth set up (`gh auth login`, or an SSH key
-> added to your account). Config, restart, and uninstall all work the same as the manual install below, except
-> use `brew services restart|stop aerospace-swipe` instead of `make restart`/`make uninstall` for the launchd
+> config, restart, and uninstall all work the same as the manual install below, except use
+> `brew services restart|stop aerospace-swipe` instead of `make restart`/`make uninstall` for the launchd
 > service — `brew` owns that plist once installed this way.
 
 ### manual
-> this fork ([MomePP/aerospace-swipe](https://github.com/MomePP/aerospace-swipe)) is private, so the plain
-> `curl | bash` one-liner won't work — `raw.githubusercontent.com` can't authenticate against a private repo.
-> Clone with `gh` (already logged in) or SSH (key added to your GitHub account) instead, then run the script
-> from inside the checkout.
-
-#### via gh CLI
 ```bash
-gh repo clone MomePP/aerospace-swipe
-cd aerospace-swipe
-./install.sh # or: make install
-```
-#### via SSH
-```bash
-git clone git@github.com:MomePP/aerospace-swipe.git
+git clone https://github.com/MomePP/aerospace-swipe.git
 cd aerospace-swipe
 ./install.sh # or: make install
 ```
@@ -83,3 +73,8 @@ brew uninstall aerospace-swipe
 cd aerospace-swipe # wherever you cloned it, e.g. ~/.local/share/aerospace-swipe
 ./uninstall.sh # or: make uninstall
 ```
+
+## acknowledgements
+- [acsandmann/aerospace-swipe](https://github.com/acsandmann/aerospace-swipe) — the original project this is forked from, by [@acsandmann](https://github.com/acsandmann)
+- [nikitabobko/AeroSpace](https://github.com/nikitabobko/AeroSpace) — the tiling window manager this drives
+- [ibireme/yyjson](https://github.com/ibireme/yyjson) — json serialization/deserialization

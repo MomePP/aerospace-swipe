@@ -3,7 +3,7 @@ CFLAGS = -std=c99 -O3 -march=native -flto -fomit-frame-pointer -funroll-loops -g
 FRAMEWORKS = -framework CoreFoundation -framework IOKit -F/System/Library/PrivateFrameworks -framework MultitouchSupport -framework ApplicationServices -framework Cocoa
 LDLIBS = -ldl
 TARGET = swipe
-VERSION = 1.1.2
+VERSION = 1.0.0
 
 # Prefer a stable local self-signed identity (see setup-codesign-identity.sh) so
 # Accessibility permission survives rebuilds; fall back to ad-hoc signing (e.g. on CI)
