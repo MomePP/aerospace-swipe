@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include "yyjson.h"
+#include <pthread.h>
 #include <pwd.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -197,4 +198,83 @@ static Config load_config()
 
 	yyjson_doc_free(doc);
 	return config;
+}
+
+// A Config that is mutated from one thread (the menu bar, on the main thread)
+// while others read it (the gesture and workspace queues).
+//
+// Readers never touch .config directly — they take a whole-struct snapshot and
+// work from that. Beyond making the reads well-defined, this is what keeps
+// fields that are only meaningful *together* consistent: the sensitivity triple
+// (distance_pct + fast_distance_factor + fast_velocity_threshold) and the
+// direction pair (swipe_left + swipe_right). A reader that caught one of those
+// groups half-written would swipe the wrong way or use a mismatched threshold.
+//
+// The mutex is a leaf: never acquire another lock while holding it. Callers
+// that need to log or update UI should do so after the mutator returns.
+typedef struct {
+	Config config;
+	pthread_mutex_t mutex;
+} ConfigStore;
+
+static inline void config_store_init(ConfigStore* store, Config config)
+{
+	store->config = config;
+	pthread_mutex_init(&store->mutex, NULL);
+}
+
+static inline Config config_store_snapshot(ConfigStore* store)
+{
+	pthread_mutex_lock(&store->mutex);
+	Config config = store->config;
+	pthread_mutex_unlock(&store->mutex);
+	return config;
+}
+
+static inline void config_store_set_sensitivity(ConfigStore* store, int level)
+{
+	pthread_mutex_lock(&store->mutex);
+	apply_sensitivity(&store->config, level);
+	pthread_mutex_unlock(&store->mutex);
+}
+
+static inline void config_store_set_fingers(ConfigStore* store, int fingers)
+{
+	pthread_mutex_lock(&store->mutex);
+	store->config.fingers = fingers;
+	pthread_mutex_unlock(&store->mutex);
+}
+
+static inline bool config_store_toggle_natural_swipe(ConfigStore* store)
+{
+	pthread_mutex_lock(&store->mutex);
+	bool natural_swipe = store->config.natural_swipe = !store->config.natural_swipe;
+	store->config.swipe_left = natural_swipe ? "next" : "prev";
+	store->config.swipe_right = natural_swipe ? "prev" : "next";
+	pthread_mutex_unlock(&store->mutex);
+	return natural_swipe;
+}
+
+static inline bool config_store_toggle_haptic(ConfigStore* store)
+{
+	pthread_mutex_lock(&store->mutex);
+	bool haptic = store->config.haptic = !store->config.haptic;
+	pthread_mutex_unlock(&store->mutex);
+	return haptic;
+}
+
+static inline bool config_store_toggle_wrap_around(ConfigStore* store)
+{
+	pthread_mutex_lock(&store->mutex);
+	bool wrap_around = store->config.wrap_around = !store->config.wrap_around;
+	pthread_mutex_unlock(&store->mutex);
+	return wrap_around;
+}
+
+static inline bool config_store_toggle_skip_empty(ConfigStore* store)
+{
+	pthread_mutex_lock(&store->mutex);
+	bool skip_empty = store->config.skip_empty = !store->config.skip_empty;
+	pthread_mutex_unlock(&store->mutex);
+	return skip_empty;
 }

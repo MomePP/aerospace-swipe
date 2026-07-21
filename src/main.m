@@ -7,10 +7,17 @@
 #include <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 static aerospace* g_aerospace = NULL;
-static CFTypeRef g_haptic = NULL;
-static Config g_config;
+// Lazily opened from the menu on the main thread, read on the workspace queue.
+static _Atomic CFTypeRef g_haptic = NULL;
+// Mutated by the menu bar on the main thread, read on the gesture and
+// workspace queues — see the ConfigStore comment in config.h. Worker paths
+// take one snapshot and pass it down by value; they never read the store
+// directly.
+static ConfigStore g_config_store;
+
 static pthread_mutex_t g_gesture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static gesture_ctx g_gesture_ctx = { 0 };
 static CFMutableDictionaryRef g_tracks = NULL;
@@ -32,7 +39,8 @@ static dispatch_queue_t g_workspace_queue;
 // another call's pair and act on a stale/foreign list.
 static pthread_mutex_t g_aerospace_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static BOOL g_enabled = YES;
+// Toggled from the menu on the main thread, read on the event-tap thread.
+static _Atomic bool g_enabled = true;
 
 // Menu bar app delegate
 @interface AppDelegate : NSObject <NSApplicationDelegate> {
@@ -50,8 +58,12 @@ static BOOL g_enabled = YES;
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    // Initial menu state is built from one snapshot, so the checkmarks can't
+    // disagree with each other even if a swipe is already in flight.
+    Config cfg = config_store_snapshot(&g_config_store);
+
     // Skip menu bar if disabled in config
-    if (!g_config.show_menu_bar) {
+    if (!cfg.show_menu_bar) {
         NSLog(@"Menu bar disabled in config");
         return;
     }
@@ -88,7 +100,7 @@ static BOOL g_enabled = YES;
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:sensitivityLabels[i] action:@selector(setSensitivity:) keyEquivalent:@""];
         item.target = self;
         item.tag = i + 1;
-        item.state = (g_config.sensitivity == i + 1) ? NSControlStateValueOn : NSControlStateValueOff;
+        item.state = (cfg.sensitivity == i + 1) ? NSControlStateValueOn : NSControlStateValueOff;
         [sensitivityMenu addItem:item];
         _sensitivityItems[i] = item;
     }
@@ -103,7 +115,7 @@ static BOOL g_enabled = YES;
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%d fingers", fingers] action:@selector(setFingers:) keyEquivalent:@""];
         item.target = self;
         item.tag = fingers;
-        item.state = (g_config.fingers == fingers) ? NSControlStateValueOn : NSControlStateValueOff;
+        item.state = (cfg.fingers == fingers) ? NSControlStateValueOn : NSControlStateValueOff;
         [fingersMenu addItem:item];
         _fingerItems[i] = item;
     }
@@ -115,22 +127,22 @@ static BOOL g_enabled = YES;
     // Toggle options
     self.hapticMenuItem = [[NSMenuItem alloc] initWithTitle:@"Haptic Feedback" action:@selector(toggleHaptic:) keyEquivalent:@""];
     self.hapticMenuItem.target = self;
-    self.hapticMenuItem.state = g_config.haptic ? NSControlStateValueOn : NSControlStateValueOff;
+    self.hapticMenuItem.state = cfg.haptic ? NSControlStateValueOn : NSControlStateValueOff;
     [menu addItem:self.hapticMenuItem];
 
     self.naturalSwipeMenuItem = [[NSMenuItem alloc] initWithTitle:@"Natural Swipe" action:@selector(toggleNaturalSwipe:) keyEquivalent:@""];
     self.naturalSwipeMenuItem.target = self;
-    self.naturalSwipeMenuItem.state = g_config.natural_swipe ? NSControlStateValueOn : NSControlStateValueOff;
+    self.naturalSwipeMenuItem.state = cfg.natural_swipe ? NSControlStateValueOn : NSControlStateValueOff;
     [menu addItem:self.naturalSwipeMenuItem];
 
     self.wrapAroundMenuItem = [[NSMenuItem alloc] initWithTitle:@"Wrap Around" action:@selector(toggleWrapAround:) keyEquivalent:@""];
     self.wrapAroundMenuItem.target = self;
-    self.wrapAroundMenuItem.state = g_config.wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
+    self.wrapAroundMenuItem.state = cfg.wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
     [menu addItem:self.wrapAroundMenuItem];
 
     self.skipEmptyMenuItem = [[NSMenuItem alloc] initWithTitle:@"Skip Empty" action:@selector(toggleSkipEmpty:) keyEquivalent:@""];
     self.skipEmptyMenuItem.target = self;
-    self.skipEmptyMenuItem.state = g_config.skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
+    self.skipEmptyMenuItem.state = cfg.skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
     [menu addItem:self.skipEmptyMenuItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
@@ -159,7 +171,9 @@ static BOOL g_enabled = YES;
 
 - (void)setSensitivity:(NSMenuItem *)sender {
     int level = (int)sender.tag;
-    apply_sensitivity(&g_config, level);
+
+    config_store_set_sensitivity(&g_config_store, level);
+    Config cfg = config_store_snapshot(&g_config_store);
 
     // Update checkmarks (1=Low, 2=Medium, 3=High)
     for (int i = 0; i < 3; i++) {
@@ -167,12 +181,13 @@ static BOOL g_enabled = YES;
     }
 
     NSLog(@"Sensitivity set to %d (distance=%.2f, fast=%.2fx@vel%.2f)",
-          level, g_config.distance_pct, g_config.fast_distance_factor, g_config.fast_velocity_threshold);
+          level, cfg.distance_pct, cfg.fast_distance_factor, cfg.fast_velocity_threshold);
 }
 
 - (void)setFingers:(NSMenuItem *)sender {
     int fingers = (int)sender.tag;
-    g_config.fingers = fingers;
+
+    config_store_set_fingers(&g_config_store, fingers);
 
     // Update checkmarks
     for (int i = 0; i < 3; i++) {
@@ -183,43 +198,43 @@ static BOOL g_enabled = YES;
 }
 
 - (void)toggleHaptic:(id)sender {
-    g_config.haptic = !g_config.haptic;
-    self.hapticMenuItem.state = g_config.haptic ? NSControlStateValueOn : NSControlStateValueOff;
+    bool haptic = config_store_toggle_haptic(&g_config_store);
+
+    self.hapticMenuItem.state = haptic ? NSControlStateValueOn : NSControlStateValueOff;
 
     // Initialize haptic if enabling and not already initialized
-    if (g_config.haptic && !g_haptic) {
+    if (haptic && !g_haptic) {
         g_haptic = haptic_open_default();
         if (!g_haptic) {
             NSLog(@"Warning: Failed to initialize haptic actuator");
         }
     }
 
-    NSLog(@"Haptic feedback %@", g_config.haptic ? @"enabled" : @"disabled");
+    NSLog(@"Haptic feedback %@", haptic ? @"enabled" : @"disabled");
 }
 
 - (void)toggleNaturalSwipe:(id)sender {
-    g_config.natural_swipe = !g_config.natural_swipe;
-    self.naturalSwipeMenuItem.state = g_config.natural_swipe ? NSControlStateValueOn : NSControlStateValueOff;
+    bool natural = config_store_toggle_natural_swipe(&g_config_store);
 
-    // Update swipe directions
-    g_config.swipe_left = g_config.natural_swipe ? "next" : "prev";
-    g_config.swipe_right = g_config.natural_swipe ? "prev" : "next";
+    self.naturalSwipeMenuItem.state = natural ? NSControlStateValueOn : NSControlStateValueOff;
 
-    NSLog(@"Natural swipe %@", g_config.natural_swipe ? @"enabled" : @"disabled");
+    NSLog(@"Natural swipe %@", natural ? @"enabled" : @"disabled");
 }
 
 - (void)toggleWrapAround:(id)sender {
-    g_config.wrap_around = !g_config.wrap_around;
-    self.wrapAroundMenuItem.state = g_config.wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
+    bool wrap_around = config_store_toggle_wrap_around(&g_config_store);
 
-    NSLog(@"Wrap around %@", g_config.wrap_around ? @"enabled" : @"disabled");
+    self.wrapAroundMenuItem.state = wrap_around ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSLog(@"Wrap around %@", wrap_around ? @"enabled" : @"disabled");
 }
 
 - (void)toggleSkipEmpty:(id)sender {
-    g_config.skip_empty = !g_config.skip_empty;
-    self.skipEmptyMenuItem.state = g_config.skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
+    bool skip_empty = config_store_toggle_skip_empty(&g_config_store);
 
-    NSLog(@"Skip empty %@", g_config.skip_empty ? @"enabled" : @"disabled");
+    self.skipEmptyMenuItem.state = skip_empty ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSLog(@"Skip empty %@", skip_empty ? @"enabled" : @"disabled");
 }
 
 - (void)quit:(id)sender {
@@ -234,14 +249,14 @@ static BOOL g_enabled = YES;
 // alone, so a stale-by-milliseconds cache is still correct). Pass a
 // pointer to a caller-owned char* that starts NULL; this function fetches
 // once and fills it in, and reuses it on subsequent calls.
-static void switch_workspace(const char* ws, char** cached_workspaces)
+static void switch_workspace(const char* ws, char** cached_workspaces, const Config* cfg)
 {
 	pthread_mutex_lock(&g_aerospace_mutex);
 
-	if (g_config.skip_empty || g_config.wrap_around) {
+	if (cfg->skip_empty || cfg->wrap_around) {
 		char* workspaces = cached_workspaces ? *cached_workspaces : NULL;
 		if (!workspaces) {
-			workspaces = aerospace_list_workspaces(g_aerospace, !g_config.skip_empty);
+			workspaces = aerospace_list_workspaces(g_aerospace, !cfg->skip_empty);
 			if (!workspaces) {
 				fprintf(stderr, "Error: Unable to retrieve workspace list.\n");
 				pthread_mutex_unlock(&g_aerospace_mutex);
@@ -250,7 +265,7 @@ static void switch_workspace(const char* ws, char** cached_workspaces)
 			if (cached_workspaces)
 				*cached_workspaces = workspaces;
 		}
-		char* result = aerospace_workspace(g_aerospace, g_config.wrap_around, ws, workspaces);
+		char* result = aerospace_workspace(g_aerospace, cfg->wrap_around, ws, workspaces);
 		if (result) {
 			fprintf(stderr, "Error: Failed to switch workspace to '%s'.\n", ws);
 		} else {
@@ -269,7 +284,7 @@ static void switch_workspace(const char* ws, char** cached_workspaces)
 		free(result);
 	}
 
-	if (g_config.haptic && g_haptic)
+	if (cfg->haptic && g_haptic)
 		haptic_actuate(g_haptic, 3);
 
 	pthread_mutex_unlock(&g_aerospace_mutex);
@@ -301,16 +316,19 @@ static void reset_gesture_state(gesture_ctx* ctx)
 // a second dispatch being scheduled. This bounds the backlog under rapid
 // swiping without ever silently dropping a step (workspace next/prev are
 // relative commands — a dropped step is a permanently wrong landing spot).
-static void maybe_dispatch_switch(gesture_ctx* ctx)
+static void maybe_dispatch_switch(gesture_ctx* ctx, Config cfg)
 {
 	if (ctx->dispatch_in_flight)
 		return;
 	ctx->dispatch_in_flight = true;
 
+	// cfg is captured by value: the whole convergence loop runs against the
+	// config that was live when this gesture frame was processed, so a menu
+	// toggle mid-flight can't flip direction or threshold under it.
 	dispatch_async(g_workspace_queue, ^{
 		for (;;) {
 			pthread_mutex_lock(&g_gesture_mutex);
-			int target = compute_target_step(ctx->acc_dx, g_config.distance_pct, g_config.max_steps);
+			int target = compute_target_step(ctx->acc_dx, cfg.distance_pct, cfg.max_steps);
 			int delta = target - ctx->executed_step;
 			pthread_mutex_unlock(&g_gesture_mutex);
 
@@ -318,8 +336,8 @@ static void maybe_dispatch_switch(gesture_ctx* ctx)
 				break;
 
 			int step_dir = delta > 0 ? 1 : -1;
-			switch_workspace(step_dir > 0 ? g_config.swipe_right : g_config.swipe_left,
-				&ctx->cached_workspace_list);
+			switch_workspace(step_dir > 0 ? cfg.swipe_right : cfg.swipe_left,
+				&ctx->cached_workspace_list, &cfg);
 
 			pthread_mutex_lock(&g_gesture_mutex);
 			ctx->executed_step += step_dir;
@@ -338,20 +356,20 @@ static void maybe_dispatch_switch(gesture_ctx* ctx)
 // feedback in this mode. Tried firing live instead (while fingers were
 // still down, for haptic perceptibility) but it felt worse in practice —
 // reverted to release-based firing per explicit testing feedback.
-static void fire_single_swipe(gesture_ctx* ctx)
+static void fire_single_swipe(gesture_ctx* ctx, Config cfg)
 {
-	bool fast = fabsf(ctx->peak_velx) >= g_config.fast_velocity_threshold;
-	float need = fast ? g_config.distance_pct * g_config.fast_distance_factor : g_config.distance_pct;
+	bool fast = fabsf(ctx->peak_velx) >= cfg.fast_velocity_threshold;
+	float need = fast ? cfg.distance_pct * cfg.fast_distance_factor : cfg.distance_pct;
 
 	if (fabsf(ctx->acc_dx) < need)
 		return;
 
 	int step_dir = ctx->acc_dx > 0 ? 1 : -1;
-	const char* ws = step_dir > 0 ? g_config.swipe_right : g_config.swipe_left;
+	const char* ws = step_dir > 0 ? cfg.swipe_right : cfg.swipe_left;
 	char** cache = &ctx->cached_workspace_list;
 
 	dispatch_async(g_workspace_queue, ^{
-		switch_workspace(ws, cache);
+		switch_workspace(ws, cache, &cfg);
 	});
 }
 
@@ -401,7 +419,7 @@ static void handle_idle_state(gesture_ctx* ctx, touch* touches, int count, float
 }
 
 static void handle_tracking_state(gesture_ctx* ctx, touch* touches, int count,
-	float avg_x, float avg_y, float avg_vel)
+	float avg_x, float avg_y, float avg_vel, Config cfg)
 {
 	float frame_dx = 0;
 	int moved = 0;
@@ -421,12 +439,12 @@ static void handle_tracking_state(gesture_ctx* ctx, touch* touches, int count,
 	if (ctx->axis == AXIS_UNDECIDED)
 		ctx->axis = decide_axis(avg_x - ctx->start_x, avg_y - ctx->start_y, ACTIVATE_PCT);
 
-	if (ctx->axis != AXIS_HORIZONTAL || !g_config.multi_swipe)
+	if (ctx->axis != AXIS_HORIZONTAL || !cfg.multi_swipe)
 		return;
 
-	int target = compute_target_step(ctx->acc_dx, g_config.distance_pct, g_config.max_steps);
+	int target = compute_target_step(ctx->acc_dx, cfg.distance_pct, cfg.max_steps);
 	if (target != ctx->executed_step)
-		maybe_dispatch_switch(ctx);
+		maybe_dispatch_switch(ctx, cfg);
 }
 
 static void gestureCallback(touch* touches, int count)
@@ -434,20 +452,24 @@ static void gestureCallback(touch* touches, int count)
 	if (!g_enabled)
 		return;
 
+	// One snapshot per frame: every decision this callback makes — and every
+	// switch it dispatches — sees a single coherent view of the config.
+	Config cfg = config_store_snapshot(&g_config_store);
+
 	pthread_mutex_lock(&g_gesture_mutex);
 
 	gesture_ctx* ctx = &g_gesture_ctx;
 
 	if (count == 0) {
-		if (ctx->state == GS_TRACKING && !g_config.multi_swipe
+		if (ctx->state == GS_TRACKING && !cfg.multi_swipe
 			&& ctx->axis == AXIS_HORIZONTAL)
-			fire_single_swipe(ctx);
+			fire_single_swipe(ctx, cfg);
 		reset_gesture_state(ctx);
 		goto unlock;
 	}
 
 	if (ctx->state == GS_IDLE) {
-		if (count != g_config.fingers) {
+		if (count != cfg.fingers) {
 			for (int i = 0; i < count; ++i) {
 				if (touches[i].slot < 0)
 					continue;
@@ -470,7 +492,7 @@ static void gestureCallback(touch* touches, int count)
 		float avg_x, avg_y, avg_vel, min_x, max_x, min_y, max_y;
 		calculate_touch_averages(touches, count, &avg_x, &avg_y, &avg_vel,
 			&min_x, &max_x, &min_y, &max_y);
-		handle_tracking_state(ctx, touches, count, avg_x, avg_y, avg_vel);
+		handle_tracking_state(ctx, touches, count, avg_x, avg_y, avg_vel, cfg);
 	}
 
 unlock:
@@ -596,16 +618,17 @@ int main(int argc, const char* argv[])
 
 		NSLog(@"Accessibility permission granted. Continuing app initialization...");
 
-		g_config = load_config();
+		config_store_init(&g_config_store, load_config());
+		Config cfg = config_store_snapshot(&g_config_store);
 		NSLog(@"Loaded config: fingers=%d, skip_empty=%s, wrap_around=%s, haptic=%s, multi_swipe=%s, max_steps=%d, swipe_left='%s', swipe_right='%s'",
-			g_config.fingers,
-			g_config.skip_empty ? "YES" : "NO",
-			g_config.wrap_around ? "YES" : "NO",
-			g_config.haptic ? "YES" : "NO",
-			g_config.multi_swipe ? "YES" : "NO",
-			g_config.max_steps,
-			g_config.swipe_left,
-			g_config.swipe_right);
+			cfg.fingers,
+			cfg.skip_empty ? "YES" : "NO",
+			cfg.wrap_around ? "YES" : "NO",
+			cfg.haptic ? "YES" : "NO",
+			cfg.multi_swipe ? "YES" : "NO",
+			cfg.max_steps,
+			cfg.swipe_left,
+			cfg.swipe_right);
 
 		g_aerospace = aerospace_new(NULL);
 		if (!g_aerospace) {
@@ -613,7 +636,7 @@ int main(int argc, const char* argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		if (g_config.haptic) {
+		if (cfg.haptic) {
 			g_haptic = haptic_open_default();
 			if (!g_haptic)
 				fprintf(stderr, "Warning: Failed to initialize haptic actuator. Continuing without haptics.\n");

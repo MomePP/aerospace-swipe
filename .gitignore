@@ -28,9 +28,14 @@ swipe.dSYM
 test_touch_slots
 test_gesture_math
 test_config
+test_config_store
 test_touch_slots.dSYM
 test_gesture_math.dSYM
 test_config.dSYM
+test_config_store.dSYM
 
 # Local git worktrees
 .worktrees/
+
+# Scratch artifacts (probes, captured output)
+.claude/tmp/
